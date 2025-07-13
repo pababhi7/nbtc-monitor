@@ -40,22 +40,33 @@ function saveDevices(devices) {
   }
 }
 
-// Fetch CSV data with retry logic
+// Fetch CSV data with retry logic and proper error handling
 function fetchCSVData(retries = 3) {
   return new Promise((resolve, reject) => {
+    console.log(`Attempting to fetch CSV data (${4 - retries}/3)...`);
+    
     const options = {
       hostname: 'hub.nbtc.go.th',
       port: 443,
       path: '/download/certification.csv',
       method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/csv,application/csv,text/plain,*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
       },
-      timeout: 30000
+      timeout: 60000,
+      rejectUnauthorized: false // Handle SSL issues with Thai government sites
     };
 
     const request = https.request(options, (response) => {
       let data = '';
+      
+      console.log(`HTTP Status: ${response.statusCode}`);
+      console.log(`Response Headers:`, response.headers);
       
       response.on('data', (chunk) => {
         data += chunk;
@@ -63,28 +74,45 @@ function fetchCSVData(retries = 3) {
       
       response.on('end', () => {
         if (response.statusCode === 200) {
+          console.log(`Successfully fetched ${data.length} bytes of CSV data`);
           resolve(data);
+        } else if (response.statusCode === 301 || response.statusCode === 302) {
+          const redirectUrl = response.headers.location;
+          console.log(`Redirecting to: ${redirectUrl}`);
+          // Handle redirect manually
+          https.get(redirectUrl, (redirectResponse) => {
+            let redirectData = '';
+            redirectResponse.on('data', (chunk) => {
+              redirectData += chunk;
+            });
+            redirectResponse.on('end', () => {
+              resolve(redirectData);
+            });
+          }).on('error', reject);
         } else {
           reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
         }
       });
       
       response.on('error', (error) => {
+        console.error('Response error:', error);
         reject(error);
       });
     });
 
     request.on('timeout', () => {
+      console.error('Request timeout');
       request.destroy();
-      reject(new Error('Request timeout'));
+      reject(new Error('Request timeout after 60 seconds'));
     });
 
     request.on('error', (error) => {
+      console.error('Request error:', error);
       if (retries > 0) {
-        console.log(`Retrying... (${retries} attempts left)`);
+        console.log(`Retrying in 5 seconds... (${retries} attempts left)`);
         setTimeout(() => {
           fetchCSVData(retries - 1).then(resolve).catch(reject);
-        }, 2000);
+        }, 5000);
       } else {
         reject(error);
       }
@@ -97,54 +125,95 @@ function fetchCSVData(retries = 3) {
 // Parse CSV data with better error handling
 function parseCSV(csvData) {
   try {
+    console.log('Starting CSV parsing...');
+    
+    if (!csvData || csvData.length < 100) {
+      throw new Error('CSV data appears to be empty or too small');
+    }
+    
     const lines = csvData.trim().split('\n');
+    console.log(`Total lines in CSV: ${lines.length}`);
+    
     if (lines.length < 2) {
       throw new Error('CSV data appears to be empty or invalid');
     }
     
-    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
-    console.log(`Found ${headers.length} headers: ${headers.slice(0, 5).join(', ')}...`);
+    // Handle different CSV formats (comma, semicolon, tab-separated)
+    const firstLine = lines[0];
+    let separator = ',';
+    if (firstLine.includes(';')) separator = ';';
+    if (firstLine.includes('\t')) separator = '\t';
+    
+    console.log(`Using separator: '${separator}'`);
+    
+    const headers = lines[0].split(separator).map(h => h.replace(/"/g, '').trim());
+    console.log(`Found ${headers.length} headers:`, headers.slice(0, 10));
     
     const devices = [];
+    let processedCount = 0;
     
     for (let i = 1; i < lines.length; i++) {
       try {
-        const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
+        const values = lines[i].split(separator).map(v => v.replace(/"/g, '').trim());
         
-        if (values.length >= 3) { // Minimum required fields
+        if (values.length >= 3) {
           const device = {};
           headers.forEach((header, index) => {
             device[header] = values[index] || '';
           });
           
-          // Filter for cellular devices with more flexible matching
-          const deviceType = device.device_type || device.DeviceType || device.type || '';
-          const isCellular = TARGET_CATEGORIES.some(cat => 
+          // More flexible device type detection
+          const deviceType = device.device_type || device.DeviceType || device.type || 
+                           device.category || device.Category || device.equipment_type || '';
+          
+          // Check if it's a cellular device
+          const isCellular = deviceType && (
+            TARGET_CATEGORIES.some(cat => deviceType.includes(cat)) ||
             deviceType.toLowerCase().includes('cellular') || 
             deviceType.toLowerCase().includes('mobile') ||
             deviceType.toLowerCase().includes('gsm') ||
             deviceType.toLowerCase().includes('lte') ||
-            deviceType.toLowerCase().includes('wcdma')
+            deviceType.toLowerCase().includes('wcdma') ||
+            deviceType.toLowerCase().includes('umts') ||
+            deviceType.toLowerCase().includes('5g') ||
+            deviceType.toLowerCase().includes('nr')
           );
           
           if (isCellular) {
-            devices.push({
-              id: device.cert_no || device.CertNo || device.id || `${i}`,
-              certificateNumber: device.cert_no || device.CertNo || '',
-              tradeName: device.trade_name || device.TradeName || device.name || '',
-              modelCode: device.model_code || device.ModelCode || device.model || '',
-              deviceType: deviceType,
-              clientName: device.clntname || device.ClientName || device.company || '',
-              discoveredAt: new Date().toISOString()
-            });
+            const certNo = device.cert_no || device.CertNo || device.certificate_no || 
+                          device.CertificateNo || device.id || '';
+            const tradeName = device.trade_name || device.TradeName || device.name || 
+                            device.product_name || device.ProductName || '';
+            const modelCode = device.model_code || device.ModelCode || device.model || 
+                            device.Model || device.model_name || '';
+            const clientName = device.clntname || device.ClientName || device.company || 
+                             device.Company || device.applicant || '';
+            
+            if (certNo && tradeName) {
+              devices.push({
+                id: certNo,
+                certificateNumber: certNo,
+                tradeName: tradeName,
+                modelCode: modelCode,
+                deviceType: deviceType,
+                clientName: clientName,
+                discoveredAt: new Date().toISOString()
+              });
+            }
           }
         }
+        
+        processedCount++;
+        if (processedCount % 1000 === 0) {
+          console.log(`Processed ${processedCount} lines...`);
+        }
+        
       } catch (lineError) {
         console.warn(`Error parsing line ${i}: ${lineError.message}`);
       }
     }
     
-    console.log(`Parsed ${devices.length} cellular devices from ${lines.length - 1} total records`);
+    console.log(`Successfully parsed ${devices.length} cellular devices from ${processedCount} total records`);
     return devices;
     
   } catch (error) {
@@ -153,8 +222,8 @@ function parseCSV(csvData) {
   }
 }
 
-// Send Telegram notification
-function sendTelegramMessage(message) {
+// Send Telegram notification with retry logic
+function sendTelegramMessage(message, retries = 3) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify({
       chat_id: TELEGRAM_CHAT_ID,
@@ -170,7 +239,8 @@ function sendTelegramMessage(message) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': data.length
-      }
+      },
+      timeout: 30000
     };
     
     const req = https.request(options, (res) => {
@@ -184,13 +254,33 @@ function sendTelegramMessage(message) {
         if (res.statusCode === 200) {
           resolve(JSON.parse(response));
         } else {
-          reject(new Error(`HTTP ${res.statusCode}: ${response}`));
+          const error = new Error(`HTTP ${res.statusCode}: ${response}`);
+          if (retries > 0) {
+            console.log(`Retrying Telegram message... (${retries} attempts left)`);
+            setTimeout(() => {
+              sendTelegramMessage(message, retries - 1).then(resolve).catch(reject);
+            }, 2000);
+          } else {
+            reject(error);
+          }
         }
       });
     });
     
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Telegram request timeout'));
+    });
+    
     req.on('error', (error) => {
-      reject(error);
+      if (retries > 0) {
+        console.log(`Retrying Telegram message... (${retries} attempts left)`);
+        setTimeout(() => {
+          sendTelegramMessage(message, retries - 1).then(resolve).catch(reject);
+        }, 2000);
+      } else {
+        reject(error);
+      }
     });
     
     req.write(data);
@@ -202,11 +292,11 @@ function sendTelegramMessage(message) {
 function formatMessage(device) {
   return `🔔 <b>New NBTC Device Certified!</b>
 
-📱 <b>Device:</b> ${device.tradeName}
-🏷️ <b>Model:</b> ${device.modelCode}
-📄 <b>Certificate:</b> ${device.certificateNumber}
-🏢 <b>Company:</b> ${device.clientName}
-📂 <b>Type:</b> ${device.deviceType}
+📱 <b>Device:</b> ${device.tradeName || 'Unknown'}
+🏷️ <b>Model:</b> ${device.modelCode || 'Unknown'}
+📄 <b>Certificate:</b> ${device.certificateNumber || 'Unknown'}
+🏢 <b>Company:</b> ${device.clientName || 'Unknown'}
+📂 <b>Type:</b> ${device.deviceType || 'Unknown'}
 
 ⏰ <b>Discovered:</b> ${new Date(device.discoveredAt).toLocaleString('en-US', { 
   timeZone: 'Asia/Kolkata',
@@ -215,10 +305,42 @@ function formatMessage(device) {
 })} IST`;
 }
 
+// Check if this is first run (initialization)
+function isFirstRun() {
+  return !fs.existsSync(DATA_FILE);
+}
+
 // Main monitoring function
 async function monitorDevices() {
   try {
     console.log('🔍 Starting NBTC device monitoring...');
+    
+    // Validate environment variables
+    if (!TELEGRAM_BOT_TOKEN) {
+      throw new Error('TELEGRAM_BOT_TOKEN environment variable is required');
+    }
+    if (!TELEGRAM_CHAT_ID) {
+      throw new Error('TELEGRAM_CHAT_ID environment variable is required');
+    }
+    
+    // Send startup notification
+    const startupMessage = `🚀 <b>NBTC Monitor Started</b>
+
+🔍 <b>Status:</b> Scraper initiated
+⏰ <b>Time:</b> ${new Date().toLocaleString('en-US', { 
+  timeZone: 'Asia/Kolkata',
+  dateStyle: 'medium',
+  timeStyle: 'short'
+})} IST
+
+Monitoring for new cellular device certifications...`;
+    
+    await sendTelegramMessage(startupMessage);
+    console.log('✅ Startup notification sent');
+    
+    // Check if this is the first run
+    const firstRun = isFirstRun();
+    console.log(`First run: ${firstRun}`);
     
     // Load existing devices
     const existingDevices = loadExistingDevices();
@@ -234,31 +356,47 @@ async function monitorDevices() {
     const currentDevices = parseCSV(csvData);
     console.log(`📊 Found ${currentDevices.length} cellular devices in database`);
     
-    // Find new devices
-    const newDevices = currentDevices.filter(device => !existingIds.has(device.id));
-    
-    if (newDevices.length > 0) {
-      console.log(`🆕 Found ${newDevices.length} new devices!`);
-      
-      // Send notifications for new devices
-      for (const device of newDevices) {
-        try {
-          const message = formatMessage(device);
-          await sendTelegramMessage(message);
-          console.log(`✅ Sent notification for: ${device.tradeName}`);
-          
-          // Small delay between messages
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        } catch (error) {
-          console.error(`❌ Failed to send notification for ${device.tradeName}:`, error);
-        }
-      }
-      
-      // Save updated device list
+    if (firstRun) {
+      // First run: Save all current devices as baseline, no notifications
       saveDevices(currentDevices);
       
-      // Send summary message
-      const summaryMessage = `📊 <b>NBTC Monitoring Summary</b>
+      const initMessage = `📝 <b>NBTC Monitor Initialized</b>
+
+📊 <b>Baseline set:</b> ${currentDevices.length} devices
+🔔 <b>Notifications:</b> Will start from next run onwards
+⏰ <b>Next check:</b> Monitoring active for new devices
+
+System is now ready to detect new certifications!`;
+      
+      await sendTelegramMessage(initMessage);
+      console.log('✅ Initial baseline set. Future runs will detect new devices.');
+      
+    } else {
+      // Regular run: Check for new devices
+      const newDevices = currentDevices.filter(device => !existingIds.has(device.id));
+      
+      if (newDevices.length > 0) {
+        console.log(`🆕 Found ${newDevices.length} new devices!`);
+        
+        // Send notifications for new devices only
+        for (const device of newDevices) {
+          try {
+            const message = formatMessage(device);
+            await sendTelegramMessage(message);
+            console.log(`✅ Sent notification for: ${device.tradeName}`);
+            
+            // Small delay between messages
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } catch (error) {
+            console.error(`❌ Failed to send notification for ${device.tradeName}:`, error);
+          }
+        }
+        
+        // Save updated device list
+        saveDevices(currentDevices);
+        
+        // Send summary message
+        const summaryMessage = `📊 <b>NBTC Monitoring Summary</b>
 
 🆕 <b>New devices found:</b> ${newDevices.length}
 📋 <b>Total devices tracked:</b> ${currentDevices.length}
@@ -266,19 +404,22 @@ async function monitorDevices() {
   timeZone: 'Asia/Kolkata',
   dateStyle: 'medium',
   timeStyle: 'short'
-})} IST`;
-      
-      await sendTelegramMessage(summaryMessage);
-      
-    } else {
-      console.log('ℹ️ No new devices found');
-      
-      // Send status update (only for morning check)
-      const now = new Date();
-      const istHour = (now.getUTCHours() + 5) % 24 + (now.getUTCMinutes() >= 30 ? 1 : 0);
-      
-      if (istHour === 5) { // 5 AM IST check
-        const statusMessage = `✅ <b>NBTC Monitor Status</b>
+})} IST
+
+✅ All notifications sent successfully!`;
+        
+        await sendTelegramMessage(summaryMessage);
+        
+      } else {
+        console.log('ℹ️ No new devices found');
+        
+        // Send status update (only for morning check)
+        const now = new Date();
+        const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000)); // Convert to IST
+        const istHour = istTime.getHours();
+        
+        if (istHour === 5 || istHour === 6) { // 5 AM or 6 AM IST check
+          const statusMessage = `✅ <b>NBTC Monitor Status</b>
 
 📊 <b>Total devices tracked:</b> ${currentDevices.length}
 🔍 <b>Status:</b> Active monitoring
@@ -289,8 +430,9 @@ async function monitorDevices() {
 })} IST
 
 No new devices found in this check.`;
-        
-        await sendTelegramMessage(statusMessage);
+          
+          await sendTelegramMessage(statusMessage);
+        }
       }
     }
     
