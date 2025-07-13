@@ -1,4 +1,5 @@
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
@@ -45,28 +46,43 @@ function fetchCSVData(retries = 3) {
   return new Promise((resolve, reject) => {
     console.log(`Attempting to fetch CSV data (${4 - retries}/3)...`);
     
+    // Try alternative URL if original fails
+    const urls = [
+      'https://hub.nbtc.go.th/download/certification.csv',
+      'https://mocheck.nbtc.go.th/download/certification.csv',
+      'https://www.nbtc.go.th/download/certification.csv'
+    ];
+    
+    const currentUrl = urls[Math.min(3 - retries, urls.length - 1)];
+    const urlObj = new URL(currentUrl);
+    
     const options = {
-      hostname: 'hub.nbtc.go.th',
+      hostname: urlObj.hostname,
       port: 443,
-      path: '/download/certification.csv',
+      path: urlObj.pathname,
       method: 'GET',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (compatible; NBTC-Monitor/1.0; +https://github.com/monitor)',
         'Accept': 'text/csv,application/csv,text/plain,*/*',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1'
+        'Accept-Encoding': 'identity',
+        'Connection': 'close',
+        'Cache-Control': 'no-cache'
       },
-      timeout: 60000,
-      rejectUnauthorized: false // Handle SSL issues with Thai government sites
+      timeout: 90000,
+      rejectUnauthorized: false,
+      secureProtocol: 'TLSv1_2_method'
     };
 
-    const request = https.request(options, (response) => {
+    console.log(`Trying URL: ${currentUrl}`);
+    
+    const requestModule = urlObj.protocol === 'https:' ? https : http;
+    
+    const request = requestModule.request(options, (response) => {
       let data = '';
       
       console.log(`HTTP Status: ${response.statusCode}`);
-      console.log(`Response Headers:`, response.headers);
+      console.log(`Content-Type: ${response.headers['content-type']}`);
       
       response.on('data', (chunk) => {
         data += chunk;
@@ -75,20 +91,35 @@ function fetchCSVData(retries = 3) {
       response.on('end', () => {
         if (response.statusCode === 200) {
           console.log(`Successfully fetched ${data.length} bytes of CSV data`);
-          resolve(data);
+          if (data.length > 100 && (data.includes('cert_no') || data.includes('certificate') || data.includes('device'))) {
+            resolve(data);
+          } else {
+            reject(new Error('Data appears to be invalid or empty'));
+          }
         } else if (response.statusCode === 301 || response.statusCode === 302) {
           const redirectUrl = response.headers.location;
           console.log(`Redirecting to: ${redirectUrl}`);
-          // Handle redirect manually
-          https.get(redirectUrl, (redirectResponse) => {
-            let redirectData = '';
-            redirectResponse.on('data', (chunk) => {
-              redirectData += chunk;
-            });
-            redirectResponse.on('end', () => {
-              resolve(redirectData);
-            });
-          }).on('error', reject);
+          
+          if (redirectUrl) {
+            const redirectUrlObj = new URL(redirectUrl);
+            const redirectModule = redirectUrlObj.protocol === 'https:' ? https : http;
+            
+            redirectModule.get(redirectUrl, (redirectResponse) => {
+              let redirectData = '';
+              redirectResponse.on('data', (chunk) => {
+                redirectData += chunk;
+              });
+              redirectResponse.on('end', () => {
+                if (redirectData.length > 100) {
+                  resolve(redirectData);
+                } else {
+                  reject(new Error('Redirect data appears to be invalid'));
+                }
+              });
+            }).on('error', reject);
+          } else {
+            reject(new Error('Redirect location not found'));
+          }
         } else {
           reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
         }
@@ -103,22 +134,69 @@ function fetchCSVData(retries = 3) {
     request.on('timeout', () => {
       console.error('Request timeout');
       request.destroy();
-      reject(new Error('Request timeout after 60 seconds'));
+      reject(new Error('Request timeout after 90 seconds'));
     });
 
     request.on('error', (error) => {
       console.error('Request error:', error);
       if (retries > 0) {
-        console.log(`Retrying in 5 seconds... (${retries} attempts left)`);
+        console.log(`Retrying with different URL... (${retries} attempts left)`);
         setTimeout(() => {
           fetchCSVData(retries - 1).then(resolve).catch(reject);
-        }, 5000);
+        }, 3000);
       } else {
         reject(error);
       }
     });
 
+    request.setTimeout(90000, () => {
+      console.error('Request timeout');
+      request.destroy();
+    });
+
     request.end();
+  });
+}
+
+// Fallback fetch method using spawn process
+async function fetchWithCurl() {
+  const { spawn } = require('child_process');
+  
+  return new Promise((resolve, reject) => {
+    const curl = spawn('curl', [
+      '-s',
+      '-L',
+      '-k',
+      '--max-time', '120',
+      '--retry', '3',
+      '--retry-delay', '2',
+      '--user-agent', 'Mozilla/5.0 (compatible; NBTC-Monitor/1.0)',
+      'https://hub.nbtc.go.th/download/certification.csv'
+    ]);
+    
+    let data = '';
+    let error = '';
+    
+    curl.stdout.on('data', (chunk) => {
+      data += chunk;
+    });
+    
+    curl.stderr.on('data', (chunk) => {
+      error += chunk;
+    });
+    
+    curl.on('close', (code) => {
+      if (code === 0 && data.length > 100) {
+        console.log(`Curl fetched ${data.length} bytes successfully`);
+        resolve(data);
+      } else {
+        reject(new Error(`Curl failed with code ${code}: ${error}`));
+      }
+    });
+    
+    curl.on('error', (err) => {
+      reject(new Error(`Curl spawn error: ${err.message}`));
+    });
   });
 }
 
@@ -350,7 +428,21 @@ Monitoring for new cellular device certifications...`;
     
     // Fetch latest data
     console.log('📥 Fetching latest certification data...');
-    const csvData = await fetchCSVData();
+    let csvData;
+    
+    try {
+      csvData = await fetchCSVData();
+    } catch (error) {
+      console.error('Primary fetch failed, trying alternative method:', error.message);
+      
+      // Fallback: Try with curl-like approach
+      try {
+        csvData = await fetchWithCurl();
+      } catch (curlError) {
+        console.error('Curl fallback also failed:', curlError.message);
+        throw new Error(`All fetch methods failed. Original: ${error.message}, Curl: ${curlError.message}`);
+      }
+    }
     
     // Parse devices
     const currentDevices = parseCSV(csvData);
