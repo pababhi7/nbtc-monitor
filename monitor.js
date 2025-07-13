@@ -40,10 +40,21 @@ function saveDevices(devices) {
   }
 }
 
-// Fetch CSV data
-function fetchCSVData() {
+// Fetch CSV data with retry logic
+function fetchCSVData(retries = 3) {
   return new Promise((resolve, reject) => {
-    https.get(CSV_URL, (response) => {
+    const options = {
+      hostname: 'hub.nbtc.go.th',
+      port: 443,
+      path: '/download/certification.csv',
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      },
+      timeout: 30000
+    };
+
+    const request = https.request(options, (response) => {
       let data = '';
       
       response.on('data', (chunk) => {
@@ -51,50 +62,95 @@ function fetchCSVData() {
       });
       
       response.on('end', () => {
-        resolve(data);
+        if (response.statusCode === 200) {
+          resolve(data);
+        } else {
+          reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
+        }
       });
       
       response.on('error', (error) => {
         reject(error);
       });
-    }).on('error', (error) => {
-      reject(error);
     });
+
+    request.on('timeout', () => {
+      request.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    request.on('error', (error) => {
+      if (retries > 0) {
+        console.log(`Retrying... (${retries} attempts left)`);
+        setTimeout(() => {
+          fetchCSVData(retries - 1).then(resolve).catch(reject);
+        }, 2000);
+      } else {
+        reject(error);
+      }
+    });
+
+    request.end();
   });
 }
 
-// Parse CSV data
+// Parse CSV data with better error handling
 function parseCSV(csvData) {
-  const lines = csvData.trim().split('\n');
-  const headers = lines[0].split(',').map(h => h.replace(/"/g, ''));
-  
-  const devices = [];
-  
-  for (let i = 1; i < lines.length; i++) {
-    const values = lines[i].split(',').map(v => v.replace(/"/g, ''));
+  try {
+    const lines = csvData.trim().split('\n');
+    if (lines.length < 2) {
+      throw new Error('CSV data appears to be empty or invalid');
+    }
     
-    if (values.length >= headers.length) {
-      const device = {};
-      headers.forEach((header, index) => {
-        device[header] = values[index] || '';
-      });
-      
-      // Filter for cellular devices
-      if (TARGET_CATEGORIES.some(cat => device.device_type?.includes(cat))) {
-        devices.push({
-          id: device.cert_no || device.id,
-          certificateNumber: device.cert_no,
-          tradeName: device.trade_name,
-          modelCode: device.model_code,
-          deviceType: device.device_type,
-          clientName: device.clntname,
-          discoveredAt: new Date().toISOString()
-        });
+    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+    console.log(`Found ${headers.length} headers: ${headers.slice(0, 5).join(', ')}...`);
+    
+    const devices = [];
+    
+    for (let i = 1; i < lines.length; i++) {
+      try {
+        const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
+        
+        if (values.length >= 3) { // Minimum required fields
+          const device = {};
+          headers.forEach((header, index) => {
+            device[header] = values[index] || '';
+          });
+          
+          // Filter for cellular devices with more flexible matching
+          const deviceType = device.device_type || device.DeviceType || device.type || '';
+          const isCellular = TARGET_CATEGORIES.some(cat => 
+            deviceType.toLowerCase().includes('cellular') || 
+            deviceType.toLowerCase().includes('mobile') ||
+            deviceType.toLowerCase().includes('gsm') ||
+            deviceType.toLowerCase().includes('lte') ||
+            deviceType.toLowerCase().includes('wcdma')
+          );
+          
+          if (isCellular) {
+            devices.push({
+              id: device.cert_no || device.CertNo || device.id || `${i}`,
+              certificateNumber: device.cert_no || device.CertNo || '',
+              tradeName: device.trade_name || device.TradeName || device.name || '',
+              modelCode: device.model_code || device.ModelCode || device.model || '',
+              deviceType: deviceType,
+              clientName: device.clntname || device.ClientName || device.company || '',
+              discoveredAt: new Date().toISOString()
+            });
+          }
+        }
+      } catch (lineError) {
+        console.warn(`Error parsing line ${i}: ${lineError.message}`);
       }
     }
+    
+    console.log(`Parsed ${devices.length} cellular devices from ${lines.length - 1} total records`);
+    return devices;
+    
+  } catch (error) {
+    console.error('Error parsing CSV:', error);
+    throw error;
   }
-  
-  return devices;
 }
 
 // Send Telegram notification
