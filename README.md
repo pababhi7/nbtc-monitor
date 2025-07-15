@@ -2,13 +2,24 @@
 
 A comprehensive web scraper for monitoring the Thai National Broadcasting and Telecommunications Commission (NBTC) equipment database, specifically designed to track **Cellular Mobile (GSM/WCDMA/LTE/NR)** equipment and send real-time Telegram notifications.
 
+## ⚠️ **Important: Cloudflare Protection Issue**
+
+**Status:** The NBTC website has very strict Cloudflare protection (HTTP 403) that blocks automated requests.
+
+**Quick Solutions Available:**
+- 🟢 **Manual Parser**: Works immediately - `python3 manual_parser.py`
+- 🟡 **Enhanced Scraper**: Requires Chrome installation - `sudo bash install_chrome.sh`
+- 🔴 **Original Scraper**: Needs Chrome + additional configuration
+
+See [SOLUTION_GUIDE.md](SOLUTION_GUIDE.md) for detailed troubleshooting.
+
 ## Features
 
 🔍 **Smart Web Scraping**
-- Handles Cloudflare protection automatically
+- Multiple Cloudflare bypass strategies
+- Enhanced browser automation with anti-detection
+- Manual HTML parsing as fallback
 - Robust retry mechanisms with exponential backoff
-- Pagination support for comprehensive data collection
-- Anti-detection measures for reliable scraping
 
 📱 **Telegram Integration**
 - Real-time notifications for new equipment
