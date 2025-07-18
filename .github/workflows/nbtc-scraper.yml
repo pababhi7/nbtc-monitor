@@ -43,6 +43,8 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
+          # ensure file exists
+          touch state.json
           git add state.json
           git diff --cached --quiet || (git commit -m "update state.json $(date -u +%F)" && git push)
 
