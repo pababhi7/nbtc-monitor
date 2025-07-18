@@ -53,15 +53,13 @@ def main():
 
     save_state(last)
 
+    # always write a valid JSON array
+    with open("new_devices.json", "w", encoding="utf-8") as f:
+        json.dump(new_devices, f, ensure_ascii=False, indent=2)
+
     if new_devices:
-        # write the list for GitHub Actions
-        with open('new_devices.json', 'w', encoding='utf-8') as f:
-            json.dump(new_devices, f, ensure_ascii=False, indent=2)
         print("New NR devices:", *new_devices, sep="\n")
-        sys.exit(1)   # non-zero => workflow detects new devices
     else:
-        with open('new_devices.json', 'w', encoding='utf-8') as f:
-            json.dump([], f)  # empty array
         print("No new devices today.")
 
 if __name__ == "__main__":
