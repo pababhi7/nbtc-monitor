@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-"""
-Scrape NBTC ‘Cellular Mobile (GSM/WCDMA/LTE/NR)’ equipment.
-Exits 0 → nothing new, 1 → new NR device found (used by the workflow).
-"""
 import os, json, datetime, sys, requests
 from bs4 import BeautifulSoup
 
 URL_TEMPLATE = "https://mocheck.nbtc.go.th/search-equipments/{id}"
 STATE_FILE   = "state.json"
-BLANK_LIMIT  = 500
+BLANK_LIMIT  = 300
 TARGET_TYPE  = "Cellular Mobile (GSM/WCDMA/LTE/NR)"
 
 def load_state():
     try:
         return json.load(open(STATE_FILE))["last_id"]
     except Exception:
-        # fallback: let CI pass it via env, else hard-code
         return int(os.getenv("START_ID", "1628277"))
 
 def save_state(last_id):
@@ -27,12 +22,9 @@ def fetch(id_):
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, "html.parser")
-        # find the 4-column table
         rows = soup.select("table.table tbody tr")
         if not rows:
             return None
-        data = {td.get_text(strip=True) for td in rows[0].find_all("td")}
-        # row order: Type | Brand | Model | Cert-No
         ttype = rows[0].find_all("td")[0].get_text(strip=True)
         if ttype != TARGET_TYPE:
             return None
@@ -60,14 +52,18 @@ def main():
             blanks += 1
 
     save_state(last)
+
     if new_devices:
+        # write the list for GitHub Actions
+        with open('new_devices.json', 'w', encoding='utf-8') as f:
+            json.dump(new_devices, f, ensure_ascii=False, indent=2)
         print("New NR devices:", *new_devices, sep="\n")
-        # write to GITHUB_OUTPUT for the workflow
-        with open(os.getenv("GITHUB_OUTPUT", "/dev/null"), "a") as gh:
-            gh.write("new_devices=" + json.dumps(new_devices) + "\n")
-        sys.exit(1)   # triggers notification job
+        sys.exit(1)   # non-zero => workflow detects new devices
     else:
+        with open('new_devices.json', 'w', encoding='utf-8') as f:
+            json.dump([], f)  # empty array
         print("No new devices today.")
 
 if __name__ == "__main__":
     main()
+    
