@@ -1,0 +1,65 @@
+name: NBTC NR Scraper (05:00 IST)
+
+on:
+  schedule:
+    # 23:30 UTC == 05:00 IST
+    - cron: "30 23 * * *"
+  workflow_dispatch:  # manual trigger for testing
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to push state.json
+      issues: write     # to open GitHub issues
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r scraper/requirements.txt
+
+      - name: Run scraper
+        id: scraper
+        env:
+          START_ID: ${{ fromJSON(steps.state.outputs.last || 1628277) }}
+        run: |
+          LAST=$(jq -r '.last_id // 1628277' state.json 2>/dev/null || echo 1628277)
+          echo "::set-output name=last::$LAST"
+          python scraper/nbtc_scraper.py || echo "new_found=true" >> $GITHUB_OUTPUT
+
+      - name: Commit updated state
+        if: always()
+        run: |
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add state.json
+          git diff --cached --quiet || (git commit -m "update state.json $(date -u +%F)" && git push)
+
+      - name: Create GitHub Issue on new device
+        if: steps.scraper.outputs.new_found
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const devices = JSON.parse('${{ steps.scraper.outputs.new_devices }}');
+            const body = devices.map(d => `- **${d.brand} ${d.model}** (ID: ${d.id}, Cert: ${d.cert})`).join("\n");
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `New NBTC 5G device – ${new Date().toISOString().slice(0,10)}`,
+              body
+            });
+
+      - name: Optional Slack / Discord webhook
+        if: steps.scraper.outputs.new_found
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"🆕 New NBTC 5G device(s) added – see GitHub Issues"}' \
+            "$SLACK_WEBHOOK"
+            
