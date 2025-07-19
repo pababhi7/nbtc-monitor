@@ -43,7 +43,7 @@ def get_device_name(eq_id: int) -> str | None:
     if r.status_code != 200:
         return None
     if "Whoops, looks like something went wrong." in r.text:
-        print("End-of-data marker found – stopping.")
+        print("  [STOP] – Whoops banner found")
         return None
     soup = BeautifulSoup(r.text, "html.parser")
     for tag in ["h2", "h3"]:
@@ -57,17 +57,22 @@ current = load_int(LAST_FILE, 1628277)
 known   = load_known()
 new_devices = []
 
-MAX_PAGES = 500        # scan up to 500 pages per run
+MAX_PAGES = 500
+print("=== Starting scan ====================================")
 for offset in range(MAX_PAGES):
     eq_id = current + offset
+    print(f"  -> {eq_id}", end="")
     name = get_device_name(eq_id)
     if name is None:          # 404 or "Whoops"
         current = eq_id       # remember stopping point
         break
-    if name not in known:
+    status = "NEW" if name not in known else "DUP"
+    print(f"  {status}: {name}")
+    if status == "NEW":
         new_devices.append(name)
         known.add(name)
-    current = eq_id + 1       # advance
+    current = eq_id + 1
+print("=== Scan finished ====================================")
 
 # persist state
 save_int(LAST_FILE, current)
