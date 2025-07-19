@@ -4,7 +4,7 @@ Daily incremental scraper for MoCheck.
 Persists:
   - .last_id   → where to resume next day
   - known.json → already-seen device names
-Stops when the page contains: Whoops, looks like something went wrong.
+Scans up to 500 new IDs per run, stops on "Whoops".
 """
 import os, sys, json, requests, re
 from bs4 import BeautifulSoup
@@ -15,7 +15,7 @@ KNOWN_FILE = "known.json"
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 CHAT_ID    = os.getenv("CHAT_ID")
 
-HEADERS = {"User-Agent": "MoCheck-Scraper/1.0 (+https://github.com/yourname/mocheck-scraper)"}
+HEADERS = {"User-Agent": "MoCheck-Scraper/1.0"}
 
 # ---------- helpers ----------
 def load_int(path: str, default: int) -> int:
@@ -39,7 +39,6 @@ def save_known(names: set[str]):
     json.dump(sorted(names), open(KNOWN_FILE, "w"), ensure_ascii=False, indent=2)
 
 def get_device_name(eq_id: int) -> str | None:
-    """Return device name or None if 404, 500, or stop banner found."""
     r = requests.get(BASE_URL.format(eq_id), headers=HEADERS, timeout=15)
     if r.status_code != 200:
         return None
@@ -54,19 +53,21 @@ def get_device_name(eq_id: int) -> str | None:
     return None
 
 # ---------- main ----------
-next_id = load_int(LAST_FILE, 1628277)
+current = load_int(LAST_FILE, 1628277)
 known   = load_known()
 new_devices = []
 
-current = next_id
-while True:
-    name = get_device_name(current)
-    if name is None:
+MAX_PAGES = 500        # scan up to 500 pages per run
+for offset in range(MAX_PAGES):
+    eq_id = current + offset
+    name = get_device_name(eq_id)
+    if name is None:          # 404 or "Whoops"
+        current = eq_id       # remember stopping point
         break
     if name not in known:
         new_devices.append(name)
         known.add(name)
-    current += 1
+    current = eq_id + 1       # advance
 
 # persist state
 save_int(LAST_FILE, current)
